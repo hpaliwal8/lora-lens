@@ -20,7 +20,7 @@ Framing throughout is **probing, not explaining**. Claims are calibrated to what
 2. **Baseline** — zero-shot DeepSeek-R1-Distill on the test set. Step-level F1 + LLM-as-judge explanation score.
 3. **Fine-tuning** — train LoRA / DoRA / rsLoRA adapters with PEFT.
 4. **Evaluation** — step F1, confusion matrix by error type, pass@1 lift on solution reranking.
-5. **Interpretability** — SVD top directions → vocab projection, `‖ΔW‖` per layer, activation diffing, tuned lens, layer ablation. Compare across adapter methods.
+5. **Interpretability** — SVD top directions → vocab projection, `‖ΔW‖` per layer, activation diffing, tuned lens, layer ablation, direct logit attribution. Compare across adapter methods.
 6. **Write-up** — README results, plots, honest framing.
 
 ## Setup
