@@ -1,0 +1,36 @@
+# Phase 1 data preparation config.
+
+prm800k:
+  # PRM800K is OpenAI's step-level human-rated MATH solutions. Several HF mirrors
+  # exist; verify the one below resolves before a full run, or swap for another.
+  hf_dataset: "Birchlabs/openai-prm800k-stepwise-critic"
+  split: "train"
+  max_examples: null  # null = use all; set an int to cap for cheaper runs
+  # Step rating mapping: PRM800K uses {-1, 0, +1} for {incorrect, neutral, correct}.
+  # We collapse neutral with the choice below.
+  neutral_policy: "drop"  # one of: "drop", "as_correct", "as_incorrect"
+
+synthetic:
+  enabled: true
+  source_dataset: "openai/gsm8k"
+  source_config: "main"
+  source_split: "train"
+  n_examples: 2500
+  error_types:
+    - arithmetic   # off-by-one, wrong operation, calculation mistake
+    - logical      # invalid inference, wrong conclusion from correct premises
+    - premise      # uses a fact not given or contradicts the problem
+    - unit         # mixes or drops units, wrong conversion
+  generator_model: "claude-sonnet-4-6"
+  max_concurrent: 8
+  max_retries: 4
+
+split:
+  train_frac: 0.8
+  val_frac: 0.1
+  test_frac: 0.1
+  seed: 42
+  # Stratify so each split has a balanced mix of error types + PRM800K vs synthetic.
+  stratify_by: ["source", "label", "error_type"]
+
+output_dir: "data/processed"
