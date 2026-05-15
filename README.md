@@ -17,9 +17,9 @@ Framing throughout is **probing, not explaining**. Claims are calibrated to what
 ## Phases
 
 1. **Data prep** — load PRM800K, generate synthetic GSM8K corruptions via Claude, split into train/val/test.
-2. **Baseline** — zero-shot DeepSeek-R1-Distill on the test set. Step-level F1 + LLM-as-judge explanation score.
+2. **Baseline** — zero-shot DeepSeek-R1-Distill on the test set. Step-level F1 + LLM-as-judge explanation score (Sonnet 4.6 during dev, Opus 4.7 for the final number — see Judging below).
 3. **Fine-tuning** — train LoRA / DoRA / rsLoRA adapters with PEFT.
-4. **Evaluation** — step F1, confusion matrix by error type, pass@1 lift on solution reranking.
+4. **Evaluation** — step F1, confusion matrix by error type, pass@1 lift on solution reranking. Same judge protocol as Phase 2.
 5. **Interpretability** — SVD top directions → vocab projection, `‖ΔW‖` per layer, activation diffing, tuned lens, layer ablation, direct logit attribution. Compare across adapter methods.
 6. **Write-up** — README results, plots, honest framing.
 
@@ -45,6 +45,17 @@ uv run python -m lora_lens.data_prep --config configs/data.yaml
 ```
 
 Output lands in `data/processed/{train,val,test}.jsonl`.
+
+## Judging
+
+LLM-as-judge is used in Phases 2 and 4 to score the model's natural-language rationales against ground truth. We use a hybrid protocol to balance cost and credibility:
+
+- **Working judge — Claude Sonnet 4.6.** Used for all dev iteration: baseline runs, training checkpoint evals, quick comparisons. Cheap enough to run dozens of times during the project.
+- **Final judge — Claude Opus 4.7.** Used once per finished model (base + each trained adapter) on the held-out test set. The numbers reported in the README come from this judge.
+- **Agreement check.** Both judges score a shared ~100-example subset; we report inter-judge agreement (Cohen's κ). High agreement means the cheap working judge's numbers were trustworthy.
+- **Human spot-check.** ~30 random final-judge labels are reviewed manually before reporting. Catches systematic judge failures that no metric will.
+
+Configured in [configs/eval.yaml](configs/eval.yaml). Reasoning for the split: judging chain-of-thought correctness is itself a reasoning task, so the final-number judge benefits from a stronger model — but paying 5× per pass during iteration is wasteful when relative ordering, not absolute scores, is what matters.
 
 ## Layout
 

@@ -1,0 +1,26 @@
+# Phase 2 & 4 evaluation config.
+# Will grow when evaluate.py is scaffolded — for now it holds the judge configuration
+# locked in during planning.
+
+judging:
+  # Used during dev iteration: baseline runs, training checkpoints, quick comparisons.
+  # Fast and cheap, accurate enough for relative comparisons.
+  working_judge_model: "claude-sonnet-4-6"
+
+  # Used for the FINAL numbers that go in the README — base model + each trained
+  # adapter, judged once on the held-out test set.
+  final_judge_model: "claude-opus-4-7"
+
+  # Inter-judge agreement check: have both judges score this many examples in common
+  # to validate that working_judge_model's numbers are trustworthy.
+  agreement_subset_size: 100
+
+  # Human spot-check: sample this many judge labels to review manually before
+  # reporting final numbers. Catches systematic judge failures.
+  human_spotcheck_size: 30
+
+  max_concurrent: 8
+  max_retries: 4
+
+# Other Phase 2/4 fields (test set path, prompt templates, metrics) will be added
+# when evaluate.py is scaffolded.
