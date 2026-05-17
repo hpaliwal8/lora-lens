@@ -26,6 +26,7 @@ import json
 import os
 import random
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -52,12 +53,11 @@ class Example:
 
 
 def load_prm800k(cfg: dict) -> list[Example]:
-    """Load PRM800K and flatten into per-step Example records.
+    """Load PRM800K from the Birchlabs stepwise-critic mirror.
 
-    PRM800K stores per-step ratings in {-1, 0, +1}. We collapse to binary using
-    `neutral_policy`. The schema of community mirrors varies slightly; this loader
-    targets the common {problem, steps:[{text, rating}]} shape and will need a
-    small tweak if your chosen mirror differs.
+    The mirror is pre-flattened: each row is already one step-level example with
+    fields {instruction, responses, next_response, rating}. We just rename and
+    map the rating to a binary label.
     """
     from datasets import load_dataset
 
@@ -70,57 +70,34 @@ def load_prm800k(cfg: dict) -> list[Example]:
     examples: list[Example] = []
 
     for row in ds:
-        problem = _extract_problem(row)
-        steps = _extract_steps(row)
-        if problem is None or not steps:
+        problem = row.get("instruction")
+        candidate = row.get("next_response")
+        prior = row.get("responses") or []
+        rating = row.get("rating")
+        if not isinstance(problem, str) or not problem.strip():
             continue
-
-        prior: list[str] = []
-        for step_text, rating in steps:
-            label = _rating_to_label(rating, neutral_policy)
-            if label is None:
-                prior.append(step_text)
-                continue
-            examples.append(
-                Example(
-                    source="prm800k",
-                    problem=problem,
-                    prior_steps=list(prior),
-                    candidate_step=step_text,
-                    label=label,
-                )
-            )
-            prior.append(step_text)
-
-    return examples
-
-
-def _extract_problem(row: dict) -> str | None:
-    for key in ("problem", "question", "prompt"):
-        if key in row and isinstance(row[key], str):
-            return row[key]
-    return None
-
-
-def _extract_steps(row: dict) -> list[tuple[str, int]]:
-    """Return list of (step_text, rating) tuples. Handles the common shapes."""
-    steps_field = row.get("steps") or row.get("label", {}).get("steps")
-    if not steps_field:
-        return []
-    out: list[tuple[str, int]] = []
-    for step in steps_field:
-        text = step.get("text") or step.get("completion") or step.get("step")
-        rating = step.get("rating")
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
         if rating is None:
-            rating = step.get("label")
-        if text is None or rating is None:
             continue
         try:
             rating_int = int(rating)
         except (TypeError, ValueError):
             continue
-        out.append((str(text), rating_int))
-    return out
+        label = _rating_to_label(rating_int, neutral_policy)
+        if label is None:
+            continue
+        examples.append(
+            Example(
+                source="prm800k",
+                problem=problem,
+                prior_steps=list(prior),
+                candidate_step=candidate,
+                label=label,
+            )
+        )
+
+    return examples
 
 
 def _rating_to_label(rating: int, policy: str) -> str | None:
@@ -183,6 +160,7 @@ async def generate_synthetic(cfg: dict) -> list[Example]:
 
     sem = asyncio.Semaphore(cfg["max_concurrent"])
     results: list[Example | None] = [None] * len(assignments)
+    failures: Counter[str] = Counter()
     pbar = tqdm(total=len(assignments), desc="synthetic")
 
     async def one(slot: int, row_idx: int, error_type: str) -> None:
@@ -191,20 +169,28 @@ async def generate_synthetic(cfg: dict) -> list[Example]:
             problem = row["question"]
             steps = _split_gsm8k_answer(row["answer"])
             if len(steps) < 3:
+                failures["too_few_steps"] += 1
                 pbar.update(1)
                 return
             try:
                 parsed = await _call_corruption(client, problem, steps, error_type, cfg)
-            except Exception:
+            except json.JSONDecodeError:
+                failures["json_decode"] += 1
+                pbar.update(1)
+                return
+            except Exception as e:
+                failures[f"api_{type(e).__name__}"] += 1
                 pbar.update(1)
                 return
             idx = parsed.get("step_index")
             if not isinstance(idx, int) or not (1 <= idx <= len(steps)):
+                failures["bad_step_index"] += 1
                 pbar.update(1)
                 return
             corrupted = parsed.get("corrupted_step")
             rationale = parsed.get("rationale")
             if not isinstance(corrupted, str) or not isinstance(rationale, str):
+                failures["bad_fields"] += 1
                 pbar.update(1)
                 return
             prior = steps[: idx - 1]
@@ -221,6 +207,10 @@ async def generate_synthetic(cfg: dict) -> list[Example]:
 
     await asyncio.gather(*[one(s, i, e) for s, (i, e) in enumerate(assignments)])
     pbar.close()
+    if failures:
+        print("      failure breakdown:")
+        for reason, count in failures.most_common():
+            print(f"        {reason}: {count}")
     return [r for r in results if r is not None]
 
 
@@ -235,6 +225,9 @@ async def _call_corruption(
     prompt = CORRUPTION_PROMPT.format(
         problem=problem, numbered_steps=numbered, error_type=error_type
     )
+    import anthropic
+
+    last_exc: Exception | None = None
     for attempt in range(cfg["max_retries"]):
         try:
             msg = await client.messages.create(
@@ -244,11 +237,19 @@ async def _call_corruption(
             )
             text = msg.content[0].text.strip()
             return json.loads(_strip_code_fence(text))
-        except (json.JSONDecodeError, KeyError, AttributeError):
-            if attempt == cfg["max_retries"] - 1:
-                raise
+        except (json.JSONDecodeError, KeyError, AttributeError, IndexError) as e:
+            last_exc = e
             await asyncio.sleep(2**attempt)
-    raise RuntimeError("unreachable")
+        except (
+            anthropic.RateLimitError,
+            anthropic.APITimeoutError,
+            anthropic.APIConnectionError,
+            anthropic.InternalServerError,
+        ) as e:
+            last_exc = e
+            await asyncio.sleep(2 ** (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _strip_code_fence(text: str) -> str:
@@ -267,31 +268,57 @@ def _split_gsm8k_answer(answer: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def stratified_split(
+def group_aware_split(
     examples: list[Example], cfg: dict
 ) -> tuple[list[Example], list[Example], list[Example]]:
-    """Stratified split by the tuple of fields in cfg['stratify_by']."""
+    """Split so a single problem never appears in more than one split.
+
+    PRM800K is row-per-step: many rows share the same `problem`. A naive row-level
+    split leaks problem context across train/val/test (97%+ of problems land in
+    multiple splits, inflating eval). We instead assign each unique PRM problem
+    to exactly one split and put all of its step-level rows there.
+
+    Synthetic examples have one row per source GSM8K problem (each problem is
+    sampled once), so a row-level split stratified by error_type is already
+    group-safe and gives balanced error-type coverage in each split.
+    """
     fracs = (cfg["train_frac"], cfg["val_frac"], cfg["test_frac"])
     assert abs(sum(fracs) - 1.0) < 1e-6, "split fractions must sum to 1"
-    keys = cfg["stratify_by"]
     rng = random.Random(cfg["seed"])
-
-    buckets: dict[tuple, list[Example]] = {}
-    for ex in examples:
-        k = tuple(getattr(ex, key) for key in keys)
-        buckets.setdefault(k, []).append(ex)
 
     train: list[Example] = []
     val: list[Example] = []
     test: list[Example] = []
-    for bucket in buckets.values():
+
+    prm = [e for e in examples if e.source == "prm800k"]
+    syn = [e for e in examples if e.source == "synthetic"]
+
+    by_problem: dict[str, list[Example]] = {}
+    for ex in prm:
+        by_problem.setdefault(ex.problem, []).append(ex)
+    problems = list(by_problem.keys())
+    rng.shuffle(problems)
+    n = len(problems)
+    n_train = int(n * fracs[0])
+    n_val = int(n * fracs[1])
+    for p in problems[:n_train]:
+        train.extend(by_problem[p])
+    for p in problems[n_train : n_train + n_val]:
+        val.extend(by_problem[p])
+    for p in problems[n_train + n_val :]:
+        test.extend(by_problem[p])
+
+    syn_buckets: dict[str | None, list[Example]] = {}
+    for ex in syn:
+        syn_buckets.setdefault(ex.error_type, []).append(ex)
+    for bucket in syn_buckets.values():
         rng.shuffle(bucket)
-        n = len(bucket)
-        n_train = int(n * fracs[0])
-        n_val = int(n * fracs[1])
-        train.extend(bucket[:n_train])
-        val.extend(bucket[n_train : n_train + n_val])
-        test.extend(bucket[n_train + n_val :])
+        m = len(bucket)
+        m_train = int(m * fracs[0])
+        m_val = int(m * fracs[1])
+        train.extend(bucket[:m_train])
+        val.extend(bucket[m_train : m_train + m_val])
+        test.extend(bucket[m_train + m_val :])
 
     rng.shuffle(train)
     rng.shuffle(val)
@@ -319,6 +346,11 @@ def main() -> None:
         action="store_true",
         help="Use a tiny subset to sanity-check the pipeline before a full run.",
     )
+    parser.add_argument(
+        "--reshuffle-only",
+        action="store_true",
+        help="Re-split existing JSONL outputs in place. No HF download, no API calls.",
+    )
     args = parser.parse_args()
     load_dotenv()
 
@@ -329,6 +361,29 @@ def main() -> None:
         cfg["prm800k"]["max_examples"] = 20
         cfg["synthetic"]["n_examples"] = 10
         cfg["output_dir"] = cfg["output_dir"].rstrip("/") + "_dryrun"
+
+    out = Path(cfg["output_dir"])
+
+    if args.reshuffle_only:
+        all_examples: list[Example] = []
+        skipped = 0
+        for name in ("train", "val", "test"):
+            with (out / f"{name}.jsonl").open() as f:
+                for line in f:
+                    d = json.loads(line)
+                    p = d.get("problem") or ""
+                    c = d.get("candidate_step") or ""
+                    if not p.strip() or not c.strip():
+                        skipped += 1
+                        continue
+                    all_examples.append(Example(**d))
+        print(f"[1/2] loaded {len(all_examples)} examples from {out}/  (dropped {skipped} empty)")
+        train, val, test = group_aware_split(all_examples, cfg["split"])
+        write_jsonl(out / "train.jsonl", train)
+        write_jsonl(out / "val.jsonl", val)
+        write_jsonl(out / "test.jsonl", test)
+        print(f"[2/2] wrote {len(train)}/{len(val)}/{len(test)} to {out}/")
+        return
 
     print(f"[1/4] loading PRM800K ({cfg['prm800k']['hf_dataset']})")
     prm = load_prm800k(cfg["prm800k"])
@@ -344,9 +399,8 @@ def main() -> None:
 
     all_examples = prm + synth
     print(f"[3/4] splitting {len(all_examples)} examples")
-    train, val, test = stratified_split(all_examples, cfg["split"])
+    train, val, test = group_aware_split(all_examples, cfg["split"])
 
-    out = Path(cfg["output_dir"])
     write_jsonl(out / "train.jsonl", train)
     write_jsonl(out / "val.jsonl", val)
     write_jsonl(out / "test.jsonl", test)
