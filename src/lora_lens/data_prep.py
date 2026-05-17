@@ -296,7 +296,8 @@ def group_aware_split(
     by_problem: dict[str, list[Example]] = {}
     for ex in prm:
         by_problem.setdefault(ex.problem, []).append(ex)
-    problems = list(by_problem.keys())
+    # Sort before shuffle so the split is invariant to input row order.
+    problems = sorted(by_problem.keys())
     rng.shuffle(problems)
     n = len(problems)
     n_train = int(n * fracs[0])
@@ -311,7 +312,9 @@ def group_aware_split(
     syn_buckets: dict[str | None, list[Example]] = {}
     for ex in syn:
         syn_buckets.setdefault(ex.error_type, []).append(ex)
-    for bucket in syn_buckets.values():
+    # Sort buckets and within-bucket items so split is invariant to input order.
+    for et in sorted(syn_buckets):
+        bucket = sorted(syn_buckets[et], key=lambda e: (e.problem, e.candidate_step))
         rng.shuffle(bucket)
         m = len(bucket)
         m_train = int(m * fracs[0])
