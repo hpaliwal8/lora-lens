@@ -46,12 +46,26 @@ uv run python -m lora_lens.data_prep --config configs/data.yaml
 
 Output lands in `data/processed/{train,val,test}.jsonl`.
 
+## Evaluation strategy
+
+`evaluate.py` is split into two subcommands so re-scoring doesn't re-pay GPU time:
+
+```bash
+uv run python -m lora_lens.evaluate --config configs/eval.yaml predict
+uv run python -m lora_lens.evaluate --config configs/eval.yaml score
+```
+
+- **Step-level F1, accuracy, per-error-type recall** are reported on the **full test set** (~108k rows). Cheap — just GPU time, no API calls.
+- **LLM-as-judge explanation scoring** runs on a **stratified 2k subsample** of the predictions (balanced across `(source, label, error_type)`). Both working and final judges score the same subsample so inter-judge agreement is well-defined.
+
+For a Mac shakeout before GPU access, pass `--limit 50` to `predict` to validate the prompt + parser on a tiny subset.
+
 ## Judging
 
-LLM-as-judge is used in Phases 2 and 4 to score the model's natural-language rationales against ground truth. We use a hybrid protocol to balance cost and credibility:
+We use a hybrid protocol to balance cost and credibility:
 
 - **Working judge — Claude Sonnet 4.6.** Used for all dev iteration: baseline runs, training checkpoint evals, quick comparisons. Cheap enough to run dozens of times during the project.
-- **Final judge — Claude Opus 4.7.** Used once per finished model (base + each trained adapter) on the held-out test set. The numbers reported in the README come from this judge.
+- **Final judge — Claude Opus 4.7.** Used once per finished model (base + each trained adapter) on the held-out test subsample. The numbers reported in the README come from this judge.
 - **Agreement check.** Both judges score a shared ~100-example subset; we report inter-judge agreement (Cohen's κ). High agreement means the cheap working judge's numbers were trustworthy.
 - **Human spot-check.** ~30 random final-judge labels are reviewed manually before reporting. Catches systematic judge failures that no metric will.
 
@@ -62,13 +76,14 @@ Configured in [configs/eval.yaml](configs/eval.yaml). Reasoning for the split: j
 ```
 src/lora_lens/
   data_prep.py    # Phase 1
+  prompts.py      # shared step-verification prompt + parser
+  evaluate.py     # Phases 2 & 4
   train.py        # Phase 3 (not yet)
-  evaluate.py     # Phases 2 & 4 (not yet)
   interpret.py    # Phase 5 (not yet)
 configs/          # one yaml per run
 notebooks/        # plots, exploratory analysis
 data/             # gitignored
-outputs/          # gitignored adapter checkpoints
+outputs/          # gitignored adapter checkpoints + predictions
 ```
 
 ## Reading list

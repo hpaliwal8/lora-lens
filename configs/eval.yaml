@@ -1,6 +1,29 @@
 # Phase 2 & 4 evaluation config.
-# Will grow when evaluate.py is scaffolded — for now it holds the judge configuration
-# locked in during planning.
+#
+# Strategy: step-level F1 reported on the full test set (cheap — just GPU time).
+# LLM-as-judge explanation scoring runs on a stratified 2k subsample so judge
+# spend stays bounded. Both judges (working + final) score the same subsample
+# so inter-judge agreement is well-defined.
+
+model:
+  hf_id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  dtype: "bfloat16"        # auto-downgraded to fp16 on MPS
+  quantize_4bit: true      # CUDA only; ignored on MPS/CPU
+  max_new_tokens: 512
+  max_input_tokens: 2048
+
+predict:
+  test_path: "data/processed/test.jsonl"
+  output_path: "outputs/baseline/predictions.jsonl"
+  limit: null              # null = full test set; int for shakeout subsample
+  subsample_seed: 0
+  batch_size: 4
+
+score:
+  predictions_path: "outputs/baseline/predictions.jsonl"
+  metrics_path: "outputs/baseline/metrics.json"
+  judge_subsample_size: 2000
+  judge_subsample_seed: 0
 
 judging:
   # Used during dev iteration: baseline runs, training checkpoints, quick comparisons.
@@ -8,7 +31,7 @@ judging:
   working_judge_model: "claude-sonnet-4-6"
 
   # Used for the FINAL numbers that go in the README — base model + each trained
-  # adapter, judged once on the held-out test set.
+  # adapter, judged once on the held-out test subsample.
   final_judge_model: "claude-opus-4-7"
 
   # Inter-judge agreement check: have both judges score this many examples in common
@@ -21,6 +44,3 @@ judging:
 
   max_concurrent: 8
   max_retries: 4
-
-# Other Phase 2/4 fields (test set path, prompt templates, metrics) will be added
-# when evaluate.py is scaffolded.
